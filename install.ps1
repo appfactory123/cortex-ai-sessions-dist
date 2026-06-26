@@ -302,12 +302,12 @@ try {
     Warn 'MCP Node deps missing — re-run setup.ps1, then register manually'
   } else {
     if (Get-Command claude -ErrorAction SilentlyContinue) {
-      & claude mcp remove -s user computer_control 2>$null | Out-Null
+      try { & claude mcp remove -s user computer_control 2>$null | Out-Null } catch {}
       & claude mcp add -e ELECTRON_RUN_AS_NODE=1 -s user computer_control -- $nodeCmd $mcpServer 2>$null | Out-Null
       if ($LASTEXITCODE -eq 0) { Ok 'registered with Claude' } else { Warn 'could not register with Claude' }
     } else { Warn 'claude CLI missing — skipped Claude MCP registration' }
     if (Get-Command codex -ErrorAction SilentlyContinue) {
-      & codex mcp remove computer_control 2>$null | Out-Null
+      try { & codex mcp remove computer_control 2>$null | Out-Null } catch {}
       & codex mcp add --env ELECTRON_RUN_AS_NODE=1 computer_control -- $nodeCmd $mcpServer 2>$null | Out-Null
       if ($LASTEXITCODE -eq 0) { Ok 'registered with Codex' } else { Warn 'could not register with Codex' }
     } else { Warn 'codex CLI missing — skipped Codex MCP registration' }
