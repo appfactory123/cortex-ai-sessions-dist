@@ -213,16 +213,36 @@ try {
   }
   Ok 'extracted bot + support files'
 
-  # ── Bun (required for Node deps + the bot) ───────────
+  # ── Bun (powers the WhatsApp bot + data-dir Node deps) ─
+  # NOT required for the main app — the packaged build bundles its own
+  # node_modules. So a Bun failure here warns and continues instead of aborting
+  # the whole install (Bun also needs Windows 10 1809+, which not every box has).
   Step 'Bun'
   Sync-Path
   if (Get-Command bun -ErrorAction SilentlyContinue) {
     Ok "bun: $((Get-Command bun).Source)"
   } else {
     Warn 'bun not found — installing…'
-    try { Invoke-RestMethod 'https://bun.sh/install.ps1' | Invoke-Expression } catch {}
+    try { Invoke-RestMethod 'https://bun.sh/install.ps1' | Invoke-Expression }
+    catch { Warn "bun web installer failed: $($_.Exception.Message)" }
     Sync-Path
-    if (Get-Command bun -ErrorAction SilentlyContinue) { Ok 'bun installed' } else { Die 'bun still not on PATH' }
+    # Fall back to winget if the web installer didn't land bun on PATH.
+    if (-not (Get-Command bun -ErrorAction SilentlyContinue) -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+      Warn 'trying winget (Oven-sh.Bun)…'
+      & winget install --id Oven-sh.Bun -e --silent --accept-source-agreements --accept-package-agreements 2>$null | Out-Null
+      Sync-Path
+    }
+    # The installer drops bun.exe under ~\.bun\bin even when PATH isn't refreshed
+    # in this session — pick it up directly before giving up.
+    $bunExe = Join-Path $env:USERPROFILE '.bun\bin\bun.exe'
+    if (-not (Get-Command bun -ErrorAction SilentlyContinue) -and (Test-Path $bunExe)) {
+      $env:Path = "$env:USERPROFILE\.bun\bin;$env:Path"
+    }
+    if (Get-Command bun -ErrorAction SilentlyContinue) {
+      Ok 'bun installed'
+    } else {
+      Warn 'bun could not be installed (it needs Windows 10 1809+). The app still works; the WhatsApp bot needs bun — install it later from https://bun.sh.'
+    }
   }
 
   # ── Dependencies (delegate to setup.ps1) ─────────────
