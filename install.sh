@@ -119,11 +119,19 @@ echo "Cortex — installer"
 # ── Preflight ───────────────────────────────────────────
 step "Preflight"
 [ "$(uname -s)" = "Darwin" ] || die "This installer is macOS-only (found $(uname -s))."
-case "$(uname -m)" in
-  arm64)  ARCH="arm64" ;;
-  x86_64) ARCH="x64" ;;
-  *)      die "Unsupported architecture: $(uname -m)" ;;
-esac
+# Use the hardware capability bit, not `uname -m`: under Rosetta (e.g. a
+# Terminal with "Open using Rosetta" enabled) `uname -m` reports x86_64 even
+# on Apple Silicon, which would download the wrong-arch .app entirely.
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
+  ARCH="arm64"
+elif [ "$(uname -m)" = "x86_64" ]; then
+  ARCH="x64"
+else
+  die "Unsupported architecture: $(uname -m)"
+fi
+if [ "$(sysctl -in sysctl.proc_translated 2>/dev/null)" = "1" ]; then
+  warn "running translated under Rosetta — installing native $ARCH build anyway"
+fi
 ok "macOS / $ARCH"
 
 APP_ZIP="Cortex-${ARCH}.zip"
