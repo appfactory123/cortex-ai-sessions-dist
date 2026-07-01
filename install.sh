@@ -149,19 +149,19 @@ if [ -z "${CORTEX_LOCAL_DIR:-}" ]; then
   [ -n "${CORTEX_VERSION:-}" ] && REF="tags/${CORTEX_VERSION}"
   if [ -n "$TOKEN" ]; then
     SOURCE_REPO="$REPO"
-    REL_JSON="$(curl -fsSL \
+    REL_JSON="$(curl -fsSL --connect-timeout 15 --max-time 30 \
       -H "Authorization: Bearer $TOKEN" \
       -H "Accept: application/vnd.github+json" \
       "https://api.github.com/repos/${REPO}/releases/${REF}")" \
-      || die "Could not fetch the release from ${REPO} (bad token, no read access, or no release published yet)."
+      || die "Could not fetch the release from ${REPO} (bad token, no read access, no release published yet, or the connection stalled)."
     TAG="$(printf '%s' "$REL_JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')"
   else
     if [ -n "${CORTEX_VERSION:-}" ]; then
       TAG="$CORTEX_VERSION"
     else
-      LATEST_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+      LATEST_URL="$(curl -fsSL --connect-timeout 15 --max-time 30 -o /dev/null -w '%{url_effective}' \
         "https://github.com/${PUBLIC_REPO}/releases/latest")" \
-        || die "Could not resolve the latest release from ${PUBLIC_REPO}."
+        || die "Could not resolve the latest release from ${PUBLIC_REPO} (no response or the connection stalled)."
       TAG="${LATEST_URL##*/}"
       [ -n "$TAG" ] && [ "$TAG" != "latest" ] \
         || die "Could not resolve the latest release tag from ${PUBLIC_REPO}."
@@ -203,15 +203,18 @@ dl() {
   elif [ -n "$TOKEN" ]; then
     id="$(asset_id "$name")"
     [ -n "$id" ] || die "release ${TAG:-?} has no asset named $name"
-    curl -fL --progress-bar \
+    # --speed-limit/--speed-time abort a genuinely stalled transfer (sustained
+    # near-zero throughput) without penalizing a slow-but-active download, which
+    # a hard --max-time would.
+    curl -fL --progress-bar --connect-timeout 15 --speed-limit 1024 --speed-time 30 \
       -H "Authorization: Bearer $TOKEN" \
       -H "Accept: application/octet-stream" \
       "https://api.github.com/repos/${REPO}/releases/assets/${id}" -o "$dest" \
-      || die "download failed: $name"
+      || die "download failed: $name (no response or the connection stalled)"
   else
     url="https://github.com/${PUBLIC_REPO}/releases/download/${TAG}/${name}"
-    curl -fL --progress-bar "$url" -o "$dest" \
-      || die "download failed: $name"
+    curl -fL --progress-bar --connect-timeout 15 --speed-limit 1024 --speed-time 30 "$url" -o "$dest" \
+      || die "download failed: $name (no response or the connection stalled)"
   fi
 }
 
@@ -252,7 +255,7 @@ if command -v bun >/dev/null 2>&1; then
   ok "bun: $(command -v bun)"
 else
   warn "bun not found — installing…"
-  curl -fsSL https://bun.sh/install | bash || die "bun install failed"
+  curl -fsSL --connect-timeout 15 --max-time 30 https://bun.sh/install | bash || die "bun install failed"
   export PATH="$HOME/.bun/bin:$PATH"
   command -v bun >/dev/null 2>&1 && ok "bun installed" || die "bun still not on PATH"
 fi
