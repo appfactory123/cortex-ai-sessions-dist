@@ -36,6 +36,14 @@ DATA_DIR="$HOME/.cortex-ai-sessions"
 CONFIG="$HOME/.cortex-ai-sessions.env"
 TOKEN="${CORTEX_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
 
+# Mirror all installer output (stdout + stderr) to a log file in the data dir,
+# in addition to the terminal, so a failed run piped from `curl | bash` can
+# still be inspected afterward.
+mkdir -p "$DATA_DIR"
+LOG_FILE="$DATA_DIR/install.log"
+exec > >(tee "$LOG_FILE") 2>&1
+echo "Cortex installer log — $(date)"
+
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
 step() { printf '\n\033[1m▶ %s\033[0m\n' "$1"; }
@@ -347,5 +355,6 @@ echo
 echo "  Launch the app:   open \"$APP_PATH\""
 echo "  WhatsApp bot:     open \"$DATA_DIR/start-bot.command\""
 echo "  Shared state:     $DATA_DIR  (settings.json, sessions.json)"
+echo "  Install log:      $LOG_FILE"
 echo
 open "$APP_PATH" 2>/dev/null || true
