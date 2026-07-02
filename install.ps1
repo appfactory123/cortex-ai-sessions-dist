@@ -297,20 +297,24 @@ try {
   $mcpServer = Join-Path $DATA_DIR 'scripts\computer-mcp\server.mjs'
   $nodeCmd = (Get-Command node -ErrorAction SilentlyContinue).Source; if (-not $nodeCmd) { $nodeCmd = 'node' }
   if (-not (Test-Path $mcpServer)) {
-    Warn 'server.mjs not in support bundle — skipping MCP registration'
+    Warn 'server.mjs not in support bundle — skipping computer-control selftest'
   } elseif (-not (Test-Path (Join-Path $DATA_DIR 'node_modules\@nut-tree-fork\nut-js'))) {
-    Warn 'MCP Node deps missing — re-run setup.ps1, then register manually'
+    Warn 'MCP Node deps missing — re-run setup.ps1, then test again'
   } else {
     if (Get-Command claude -ErrorAction SilentlyContinue) {
       try { & claude mcp remove -s user computer_control 2>$null | Out-Null } catch {}
-      & claude mcp add -e ELECTRON_RUN_AS_NODE=1 -s user computer_control -- $nodeCmd $mcpServer 2>$null | Out-Null
-      if ($LASTEXITCODE -eq 0) { Ok 'registered with Claude' } else { Warn 'could not register with Claude' }
-    } else { Warn 'claude CLI missing — skipped Claude MCP registration' }
+      Ok 'removed stale Claude computer-control registration'
+    } else { Warn 'claude CLI missing — skipped stale Claude registration cleanup' }
     if (Get-Command codex -ErrorAction SilentlyContinue) {
       try { & codex mcp remove computer_control 2>$null | Out-Null } catch {}
-      & codex mcp add --env ELECTRON_RUN_AS_NODE=1 computer_control -- $nodeCmd $mcpServer 2>$null | Out-Null
-      if ($LASTEXITCODE -eq 0) { Ok 'registered with Codex' } else { Warn 'could not register with Codex' }
-    } else { Warn 'codex CLI missing — skipped Codex MCP registration' }
+      Ok 'removed stale Codex computer-control registration'
+    } else { Warn 'codex CLI missing — skipped stale Codex registration cleanup' }
+    $selftest = Join-Path $DATA_DIR 'scripts\computer-mcp\selftest.mjs'
+    if (Test-Path $selftest) {
+      & $nodeCmd $selftest --node $nodeCmd --server $mcpServer 2>$null | Out-Null
+      if ($LASTEXITCODE -eq 0) { Ok 'computer-control selftest passed' }
+      else { Warn 'computer-control selftest failed — live tool calls need attention' }
+    } else { Warn 'selftest.mjs missing — could not verify live computer-control tool calls' }
   }
 
   # ── Google Chrome (WhatsApp bot via Puppeteer) ───────

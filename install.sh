@@ -303,39 +303,38 @@ else
 fi
 
 # ── Computer-control MCP server (mouse / keyboard / screen) ─
-# Registers the local MCP server (scripts/computer-mcp/server.mjs — shipped in the
-# support bundle; its Node deps were installed by setup.command above) with both
-# CLIs at user/global scope, so the in-app agents (and interactive claude/codex)
-# can drive the desktop. Best-effort: skip a CLI that isn't installed. The server
-# resolves its deps from $DATA_DIR/node_modules, so it must run by absolute path.
+# Cortex injects this MCP server per opted-in session. Do not register it at
+# user/global CLI scope here; remove stale global registrations from older
+# installs, then run the live server selftest.
 step "Computer-control MCP server"
 MCP_SERVER="$DATA_DIR/scripts/computer-mcp/server.mjs"
 MCP_NODE="$(command -v node || echo node)"
 if [ ! -f "$MCP_SERVER" ]; then
-  warn "server.mjs not in support bundle — skipping MCP registration"
+  warn "server.mjs not in support bundle — skipping computer-control selftest"
 elif [ ! -d "$DATA_DIR/node_modules/@nut-tree-fork/nut-js" ]; then
-  warn "MCP Node deps missing — re-run setup.command, then register manually"
+  warn "MCP Node deps missing — re-run setup.command, then test again"
 else
   if command -v claude >/dev/null 2>&1; then
     claude mcp remove -s user computer_control >/dev/null 2>&1 || true
-    # -e is variadic: keep -s after the env value so the list ends before the name.
-    if claude mcp add -e ELECTRON_RUN_AS_NODE=1 -s user computer_control -- "$MCP_NODE" "$MCP_SERVER" >/dev/null 2>&1; then
-      ok "registered with Claude"
-    else
-      warn "could not register with Claude"
-    fi
+    ok "removed stale Claude computer-control registration"
   else
-    warn "claude CLI missing — skipped Claude MCP registration"
+    warn "claude CLI missing — skipped stale Claude registration cleanup"
   fi
   if command -v codex >/dev/null 2>&1; then
     codex mcp remove computer_control >/dev/null 2>&1 || true
-    if codex mcp add --env ELECTRON_RUN_AS_NODE=1 computer_control -- "$MCP_NODE" "$MCP_SERVER" >/dev/null 2>&1; then
-      ok "registered with Codex"
+    ok "removed stale Codex computer-control registration"
+  else
+    warn "codex CLI missing — skipped stale Codex registration cleanup"
+  fi
+  MCP_SELFTEST="$DATA_DIR/scripts/computer-mcp/selftest.mjs"
+  if [ -f "$MCP_SELFTEST" ]; then
+    if "$MCP_NODE" "$MCP_SELFTEST" --node "$MCP_NODE" --server "$MCP_SERVER" >/dev/null 2>&1; then
+      ok "computer-control selftest passed"
     else
-      warn "could not register with Codex"
+      warn "computer-control selftest failed — live tool calls need attention"
     fi
   else
-    warn "codex CLI missing — skipped Codex MCP registration"
+    warn "selftest.mjs missing — could not verify live computer-control tool calls"
   fi
   warn "Grant Accessibility + Screen Recording to the app (System Settings → Privacy & Security) for mouse/screen control."
 fi
