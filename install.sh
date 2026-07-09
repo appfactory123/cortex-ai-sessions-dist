@@ -145,6 +145,82 @@ ensure_local_bin_link() {
   fi
 }
 
+# Ensure Node.js + npm are available.
+#
+# The Claude/Codex CLIs the bot drives are installed via `npm install -g`, and
+# the app's MCP servers run on `node`. A machine with no Node has no npm, so
+# those steps were silently skipped ("npm unavailable") and sign-in then failed.
+# Install Node without assuming any package manager: prefer Homebrew when it's
+# present, otherwise drop the official Node LTS build into ~/.local (its bin dir
+# is already on PATH and is the app's CLI fallback root). Depends on $ARCH, so
+# call this only after Preflight has set it.
+ensure_node() {
+  hash -r 2>/dev/null || true
+  if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+    ok "node: $(command -v node) · npm: $(command -v npm)"
+    return 0
+  fi
+  if command -v brew >/dev/null 2>&1; then
+    warn "node/npm not found — installing via Homebrew…"
+    if brew install node >/dev/null 2>&1; then
+      hash -r 2>/dev/null || true
+      command -v npm >/dev/null 2>&1 && { ok "Node installed via Homebrew"; return 0; }
+    fi
+    warn "Homebrew node install failed — falling back to the official Node build"
+  fi
+
+  # Official prebuilt Node from nodejs.org — no package manager required. The
+  # dist filenames use x64/arm64, matching our $ARCH values.
+  local node_arch tmp url srcdir node_ver
+  case "$ARCH" in
+    arm64) node_arch="arm64" ;;
+    x64)   node_arch="x64" ;;
+    *) warn "cannot auto-install Node for arch $ARCH — install it from https://nodejs.org"; return 1 ;;
+  esac
+  warn "node/npm not found — downloading the official Node LTS build…"
+  tmp="$(mktemp -d)"
+  # index.json lists releases newest-first; the first entry whose "lts" is a
+  # codename (not false) is the current LTS line. Derive its version and build
+  # the versioned dist URL — the /latest-lts/ alias has no stable filename.
+  # `|| true`: a non-matching grep in the pipeline must not abort the installer
+  # under `set -euo pipefail` — the emptiness check below handles that case.
+  node_ver="$(curl -fsSL --connect-timeout 15 --max-time 30 https://nodejs.org/dist/index.json 2>/dev/null \
+    | tr '{' '\n' | grep '"lts":"' | head -1 \
+    | grep -oE '"version":"v[0-9.]+"' | grep -oE 'v[0-9.]+' | head -1 || true)"
+  if [ -z "$node_ver" ]; then
+    warn "could not resolve the latest Node LTS version — install Node from https://nodejs.org"
+    rm -rf "$tmp"; return 1
+  fi
+  url="https://nodejs.org/dist/${node_ver}/node-${node_ver}-darwin-${node_arch}.tar.gz"
+  if ! curl -fL --connect-timeout 15 --speed-limit 1024 --speed-time 30 "$url" -o "$tmp/node.tar.gz"; then
+    warn "Node download failed — install Node from https://nodejs.org"
+    rm -rf "$tmp"; return 1
+  fi
+  if ! tar -xzf "$tmp/node.tar.gz" -C "$tmp"; then
+    warn "could not extract Node archive"; rm -rf "$tmp"; return 1
+  fi
+  srcdir="$(find "$tmp" -maxdepth 1 -type d -name 'node-v*' | head -1)"
+  if [ -z "$srcdir" ]; then
+    warn "unexpected Node archive layout"; rm -rf "$tmp"; return 1
+  fi
+  # Merge the toolchain into ~/.local so bin/node + bin/npm land on PATH and the
+  # npm symlink still resolves against ~/.local/lib/node_modules.
+  mkdir -p "$HOME/.local/bin" "$HOME/.local/lib" "$HOME/.local/include" "$HOME/.local/share"
+  cp -R "$srcdir/bin/." "$HOME/.local/bin/" 2>/dev/null || true
+  cp -R "$srcdir/lib/." "$HOME/.local/lib/" 2>/dev/null || true
+  cp -R "$srcdir/include/." "$HOME/.local/include/" 2>/dev/null || true
+  cp -R "$srcdir/share/." "$HOME/.local/share/" 2>/dev/null || true
+  rm -rf "$tmp"
+  export PATH="$HOME/.local/bin:$PATH"
+  hash -r 2>/dev/null || true
+  if command -v npm >/dev/null 2>&1; then
+    ok "Node installed → $(command -v node)"
+    return 0
+  fi
+  warn "Node install did not put npm on PATH — install Node from https://nodejs.org"
+  return 1
+}
+
 echo "Cortex — installer"
 
 # ── Preflight ───────────────────────────────────────────
@@ -298,6 +374,10 @@ else
   export PATH="$HOME/.bun/bin:$PATH"
   command -v bun >/dev/null 2>&1 && ok "bun installed" || die "bun still not on PATH"
 fi
+
+# ── Node.js + npm (runtime for MCP servers; installs the Claude/Codex CLIs) ─
+step "Node.js"
+ensure_node || warn "continuing without Node — the Claude/Codex CLIs and node-based MCP servers may be unavailable"
 
 # ── Delegate Node + Python deps + config to setup.command ─
 # setup.command (run from the data dir) installs Node deps via bun, installs the
