@@ -162,7 +162,11 @@ ensure_node() {
   fi
   if command -v brew >/dev/null 2>&1; then
     warn "node/npm not found — installing via Homebrew…"
-    if brew install node >/dev/null 2>&1; then
+    # `</dev/null`: the installer is run as `curl … | bash`, so the script IS
+    # stdin. A real `brew install` reads stdin during its fetch/first-run path
+    # and would swallow the rest of the script, silently ending the run right
+    # after this step. Detach stdin so brew can't eat the remaining commands.
+    if brew install node </dev/null >/dev/null 2>&1; then
       hash -r 2>/dev/null || true
       command -v npm >/dev/null 2>&1 && { ok "Node installed via Homebrew"; return 0; }
     fi
@@ -501,7 +505,7 @@ if [ -d "/Applications/Google Chrome.app" ]; then
   ok "Google Chrome installed"
 elif command -v brew >/dev/null 2>&1; then
   warn "Google Chrome not found — installing via Homebrew…"
-  brew install --cask google-chrome >/dev/null 2>&1 && ok "Google Chrome installed" \
+  brew install --cask google-chrome </dev/null >/dev/null 2>&1 && ok "Google Chrome installed" \
     || warn "install failed — install manually (https://www.google.com/chrome/); needed for the WhatsApp bot."
 else
   warn "Google Chrome not found — install it (https://www.google.com/chrome/); needed for the WhatsApp bot."
