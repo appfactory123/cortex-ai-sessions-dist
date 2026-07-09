@@ -339,6 +339,44 @@ else
   warn "Grant Accessibility + Screen Recording to the app (System Settings → Privacy & Security) for mouse/screen control."
 fi
 
+# ── Obsidian MCP server (vault read/write for agent sessions) ─
+# Cortex injects this MCP server per opted-in session (composer "Obsidian"
+# toggle). Do not register it at user/global CLI scope here; remove stale
+# global registrations from older setups, then run the live server selftest.
+step "Obsidian MCP server"
+OBSIDIAN_MCP_SERVER="$DATA_DIR/scripts/obsidian-mcp/server.mjs"
+if [ ! -f "$OBSIDIAN_MCP_SERVER" ]; then
+  warn "server.mjs not in support bundle — skipping Obsidian MCP selftest"
+else
+  if command -v claude >/dev/null 2>&1; then
+    claude mcp remove -s user obsidian >/dev/null 2>&1 || true
+    claude mcp remove -s local obsidian >/dev/null 2>&1 || true
+    ok "removed stale Claude obsidian registration"
+  else
+    warn "claude CLI missing — skipped stale Claude registration cleanup"
+  fi
+  if command -v codex >/dev/null 2>&1; then
+    codex mcp remove obsidian >/dev/null 2>&1 || true
+    ok "removed stale Codex obsidian registration"
+  else
+    warn "codex CLI missing — skipped stale Codex registration cleanup"
+  fi
+  if ! command -v obsidian >/dev/null 2>&1; then
+    warn "obsidian CLI not found — install Obsidian ≥1.12 and enable it (Settings → General → Command line interface)"
+  else
+    OBSIDIAN_MCP_SELFTEST="$DATA_DIR/scripts/obsidian-mcp/selftest.mjs"
+    if [ -f "$OBSIDIAN_MCP_SELFTEST" ]; then
+      if "$MCP_NODE" "$OBSIDIAN_MCP_SELFTEST" "$OBSIDIAN_MCP_SERVER" >/dev/null 2>&1; then
+        ok "Obsidian MCP selftest passed"
+      else
+        warn "Obsidian MCP selftest failed — the Obsidian app must be running with a vault open"
+      fi
+    else
+      warn "selftest.mjs missing — could not verify live Obsidian tool calls"
+    fi
+  fi
+fi
+
 # ── Google Chrome (WhatsApp bot via Puppeteer) ─
 # The WhatsApp bot needs Chrome for Puppeteer. Best-effort install via Homebrew
 # cask; warn if unavailable.

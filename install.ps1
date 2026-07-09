@@ -317,6 +317,33 @@ try {
     } else { Warn 'selftest.mjs missing - could not verify live computer-control tool calls' }
   }
 
+  # -- Obsidian MCP server (vault read/write for agent sessions) -------------
+  Step 'Obsidian MCP server'
+  $obsidianMcpServer = Join-Path $DATA_DIR 'scripts\obsidian-mcp\server.mjs'
+  if (-not (Test-Path $obsidianMcpServer)) {
+    Warn 'server.mjs not in support bundle - skipping Obsidian MCP selftest'
+  } else {
+    if (Get-Command claude -ErrorAction SilentlyContinue) {
+      try { & claude mcp remove -s user obsidian 2>$null | Out-Null } catch {}
+      try { & claude mcp remove -s local obsidian 2>$null | Out-Null } catch {}
+      Ok 'removed stale Claude obsidian registration'
+    } else { Warn 'claude CLI missing - skipped stale Claude registration cleanup' }
+    if (Get-Command codex -ErrorAction SilentlyContinue) {
+      try { & codex mcp remove obsidian 2>$null | Out-Null } catch {}
+      Ok 'removed stale Codex obsidian registration'
+    } else { Warn 'codex CLI missing - skipped stale Codex registration cleanup' }
+    if (-not (Get-Command obsidian -ErrorAction SilentlyContinue)) {
+      Warn 'obsidian CLI not found - install Obsidian >=1.12 and enable it (Settings > General > Command line interface)'
+    } else {
+      $obsidianSelftest = Join-Path $DATA_DIR 'scripts\obsidian-mcp\selftest.mjs'
+      if (Test-Path $obsidianSelftest) {
+        & $nodeCmd $obsidianSelftest $obsidianMcpServer 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { Ok 'Obsidian MCP selftest passed' }
+        else { Warn 'Obsidian MCP selftest failed - the Obsidian app must be running with a vault open' }
+      } else { Warn 'selftest.mjs missing - could not verify live Obsidian tool calls' }
+    }
+  }
+
   # -- Google Chrome (WhatsApp bot via Puppeteer) ----------------------------
   Step 'Google Chrome'
   $chromePaths = @(
