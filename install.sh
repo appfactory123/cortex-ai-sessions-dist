@@ -114,6 +114,37 @@ else
   export PATH="$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 fi
 
+LOCAL_BIN="$HOME/.local/bin"
+
+# Guarantee ~/.local/bin/<name> exists for a CLI the app drives.
+#
+# Cortex is launched from the macOS GUI (Finder/Dock), where PATH is launchd's
+# minimal default (/usr/bin:/bin:/usr/sbin:/sbin) — NOT the login-shell PATH.
+# So an npm-global `claude`/`codex` that works in Terminal is invisible to the
+# app, and lib/paths.ts (findClaudeBin/findCodexBin) falls back to
+# ~/.local/bin/<name>. If nothing is there the app spawns a missing path and
+# dies with "spawn /Users/<user>/.local/bin/<name> ENOENT" at sign-in.
+# Symlink whatever the CLI resolved to into ~/.local/bin so that fallback holds.
+ensure_local_bin_link() {
+  local name="$1" resolved
+  mkdir -p "$LOCAL_BIN"
+  hash -r 2>/dev/null || true
+  if [ -x "$LOCAL_BIN/$name" ]; then
+    ok "$name available at $LOCAL_BIN/$name (app fallback path)"
+    return 0
+  fi
+  resolved="$(command -v "$name" 2>/dev/null || true)"
+  if [ -z "$resolved" ]; then
+    warn "$name not found on PATH — the app expects it at $LOCAL_BIN/$name"
+    return 0
+  fi
+  if [ "$resolved" != "$LOCAL_BIN/$name" ]; then
+    ln -sf "$resolved" "$LOCAL_BIN/$name" \
+      && ok "linked $name → $LOCAL_BIN/$name (was $resolved)" \
+      || warn "could not link $name into $LOCAL_BIN — sign-in may fail with ENOENT"
+  fi
+}
+
 echo "Cortex — installer"
 
 # ── Preflight ───────────────────────────────────────────
@@ -286,6 +317,9 @@ elif command -v npm >/dev/null 2>&1; then
 else
   warn "claude not found and npm unavailable — install Node, then: npm install -g @anthropic-ai/claude-code"
 fi
+# The GUI-launched app resolves claude at ~/.local/bin/claude (see findClaudeBin);
+# npm-global installs land elsewhere, so link it there or sign-in fails w/ ENOENT.
+ensure_local_bin_link claude
 
 # ── Codex CLI ───────────────────────────────────────────
 # The bot can auto-reply with Codex as well as Claude. The @openai/codex npm
@@ -301,6 +335,8 @@ elif command -v npm >/dev/null 2>&1; then
 else
   warn "codex not found and npm unavailable — install Node, then: npm install -g @openai/codex"
 fi
+# Same GUI-PATH fallback as claude: findCodexBin resolves ~/.local/bin/codex.
+ensure_local_bin_link codex
 
 # ── Computer-control MCP server (mouse / keyboard / screen) ─
 # Cortex injects this MCP server per opted-in session. Do not register it at
