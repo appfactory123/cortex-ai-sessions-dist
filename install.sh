@@ -8,8 +8,10 @@
 #
 # Installs the app to /Applications, provisions a data dir (~/.cortex-ai-sessions)
 # with the bot + support files, and installs every runtime library (Node deps
-# via Bun, Python cryptography/tls-client/openai-whisper, ffmpeg, Google Chrome,
-# and the Claude + Codex CLIs the auto-reply bot drives). Unsigned: the app's quarantine flag is stripped so
+# via Bun, Python cryptography/tls-client, a managed MLX-or-Whisper realtime
+# speech model, a managed local Qwen Jarvis voice, ffmpeg,
+# Google Chrome, and the Claude, Codex, Antigravity, and Grok CLIs Cortex drives).
+# Unsigned: the app's quarantine flag is stripped so
 # Gatekeeper doesn't block it. Safe to re-run.
 #
 # Developers can instead pull an unreleased build from the PRIVATE source repo
@@ -35,6 +37,7 @@ APP_PATH="/Applications/${APP_NAME}.app"
 DATA_DIR="$HOME/.cortex-ai-sessions"
 CONFIG="$HOME/.cortex-ai-sessions.env"
 TOKEN="${CORTEX_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+IN_APP_UPDATE="${CORTEX_IN_APP_UPDATE:-}"
 
 # Mirror all installer output (stdout + stderr) to a log file in the data dir,
 # in addition to the terminal, so a failed run piped from `curl | bash` can
@@ -46,8 +49,27 @@ echo "Cortex installer log — $(date)"
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
-step() { printf '\n\033[1m▶ %s\033[0m\n' "$1"; }
-die()  { printf '\033[31m✗ %s\033[0m\n' "$1" >&2; exit 1; }
+step() { printf '\n\033[1m▶ [%s] %s\033[0m\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$1"; }
+die()  {
+  printf '\033[31m✗ %s\033[0m\n' "$1" >&2
+  printf '\033[31m  Full log: %s\033[0m\n' "$LOG_FILE" >&2
+  exit 1
+}
+
+# Run a command, retrying up to <attempts> times with a short linear backoff.
+# Used for network steps (release download, bun bootstrap) that fail
+# transiently on flaky links rather than for a real, permanent error.
+retry() {
+  local attempts="$1"; shift
+  local n=1
+  while true; do
+    "$@" && return 0
+    if [ "$n" -ge "$attempts" ]; then return 1; fi
+    warn "attempt $n/$attempts failed — retrying in $((n * 2))s…"
+    sleep "$((n * 2))"
+    n=$((n + 1))
+  done
+}
 
 app_executable_pattern() {
   printf '%s/Contents/MacOS/%s' "$APP_PATH" "$APP_NAME"
@@ -55,6 +77,37 @@ app_executable_pattern() {
 
 app_pids() {
   pgrep -f "$(app_executable_pattern)" 2>/dev/null || true
+}
+
+APP_RELAUNCH_REQUIRED=""
+APP_RELAUNCHED=""
+APP_BACKUP=""
+
+relaunch_installed_app() {
+  [ "$IN_APP_UPDATE" = "1" ] || return 0
+  [ -d "$APP_PATH" ] || {
+    warn "cannot relaunch ${APP_NAME}: $APP_PATH is missing"
+    return 1
+  }
+  if [ -n "$(app_pids)" ]; then
+    APP_RELAUNCHED=1
+    return 0
+  fi
+
+  local attempt check
+  for attempt in 1 2 3; do
+    open "$APP_PATH" >/dev/null 2>&1 || true
+    for check in 1 2 3 4 5 6 7 8 9 10; do
+      if [ -n "$(app_pids)" ]; then
+        APP_RELAUNCHED=1
+        ok "${APP_NAME} relaunched; finishing setup in the background"
+        return 0
+      fi
+      sleep 0.5
+    done
+    warn "relaunch attempt $attempt/3 did not start ${APP_NAME}"
+  done
+  return 1
 }
 
 refresh_launchservices() {
@@ -115,6 +168,261 @@ else
 fi
 
 LOCAL_BIN="$HOME/.local/bin"
+# Filled after the fixed config is parsed below. Cortex resolves Grok from
+# GROK_HOME first; the upstream installer instead exposes GROK_BIN_DIR.
+GROK_CLI_HOME=""
+GROK_CLI_BIN_DIR=""
+
+# The packaged Electron app also reads these path settings from the fixed config
+# file. Read only literal assignments for this narrow allowlist — never source
+# the config as shell code — so an installer rerun respects the same executable
+# and Grok provider home as the app.
+load_cli_overrides_from_config() {
+  [ -f "$CONFIG" ] || return 0
+  local line key value
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    if [[ "$line" =~ ^(CLAUDE_BIN|CODEX_BIN|AGY_BIN|GROK_BIN|GROK_HOME)[[:space:]]*=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+    else
+      continue
+    fi
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in
+      \"*\") value="${value#\"}"; value="${value%\"}" ;;
+      \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+    [ -n "$value" ] || continue
+    [ -z "${!key:-}" ] && export "$key=$value"
+  done < "$CONFIG"
+}
+
+# Keep a literal backup across setup.command. The raw public installer can be
+# newer than the release support bundle it downloads, so that bundle may still
+# contain an older setup.command which rewrites the config without preserving
+# user-owned CLI paths or voice credentials/settings. Never source these values.
+PRESERVED_CONFIG_KEYS='PYTHON_BIN|CLAUDE_BIN|CODEX_BIN|AGY_BIN|GROK_BIN|GROK_HOME|KIMI_BIN|KIMI_SHARE_DIR|UV_BIN|CORTEX_OPENAI_API_KEY|OPENAI_API_KEY|CORTEX_ELEVENLABS_API_KEY|ELEVENLABS_API_KEY|CORTEX_VOICE_TTS_PROVIDER|CORTEX_VOICE_TTS_PYTHON|CORTEX_VOICE_TTS_DEVICE|CORTEX_VOICE_TTS_MODEL|CORTEX_VOICE_TTS_VOICE|CORTEX_ELEVENLABS_VOICE_ID|CORTEX_ELEVENLABS_MODEL|CORTEX_VOICE_TTS_LOCAL_VOICE|CORTEX_VOICE_TTS_QWEN_MODEL|CORTEX_VOICE_TTS_QWEN_REVISION|CORTEX_VOICE_TTS_QWEN_CACHE|CORTEX_VOICE_TTS_QWEN_PROFILE|CORTEX_VOICE_TTS_QWEN_VOICE_PROMPT|CORTEX_VOICE_DUPLEX|CORTEX_VOICE_TTS_CAPABILITY_READY_WAIT_MS|CORTEX_VOICE_TTS_LOCAL_READY_GRACE_MS|CORTEX_VOICE_TTS_DAEMON_READY_TIMEOUT_MS|CORTEX_VOICE_TTS_LOCAL_RESPONSE_TIMEOUT_MS'
+capture_preserved_config_lines() {
+  [ -f "$CONFIG" ] || return 0
+  local line key value
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    if [[ "$line" =~ ^($PRESERVED_CONFIG_KEYS)[[:space:]]*=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      [ -n "$value" ] && printf '%s=%s\n' "$key" "$value"
+    fi
+  done < "$CONFIG"
+}
+
+restore_preserved_config_lines() {
+  local saved="$1" line key
+  [ -n "$saved" ] || return 0
+  if ! touch "$CONFIG"; then
+    warn "could not restore user settings to $CONFIG"
+    return 0
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    key="${line%%=*}"
+    [[ "$key" =~ ^($PRESERVED_CONFIG_KEYS)$ ]] || continue
+    if ! grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "$CONFIG"; then
+      # Prefix a newline so a legacy setup file without a final newline cannot
+      # merge its last assignment with this restored one.
+      printf '\n%s\n' "$line" >> "$CONFIG" \
+        || { warn "could not restore $key to $CONFIG"; return 0; }
+    fi
+  done <<< "$saved"
+}
+
+refresh_grok_cli_home() {
+  # xAI's installer stores auth/download metadata under ~/.grok even when its
+  # GROK_BIN_DIR places the launcher in Cortex's configured provider home.
+  GROK_CLI_HOME="${GROK_HOME:-$HOME/.grok}"
+  GROK_CLI_BIN_DIR="$GROK_CLI_HOME/bin"
+}
+
+load_cli_overrides_from_config
+refresh_grok_cli_home
+
+# A CLI path set explicitly by the user is outside of Cortex's ownership.  The
+# installer must never replace it just because a newer vendor build exists.
+cli_override_is_set() {
+  local variable="$1"
+  [ -n "${!variable:-}" ]
+}
+
+# `readlink -f` is not available on the macOS version of readlink. Resolve a
+# symlink chain ourselves so npm-managed CLIs linked through ~/.local/bin are
+# still recognised as npm-managed rather than mistaken for custom binaries.
+resolve_cli_path() {
+  local path="$1" target parent
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) ;;
+    *)
+      parent="$(cd -P "$(dirname "$path")" 2>/dev/null && pwd)" || return 1
+      path="$parent/$(basename "$path")"
+      ;;
+  esac
+  while [ -L "$path" ]; do
+    target="$(readlink "$path" 2>/dev/null || true)"
+    [ -n "$target" ] || break
+    case "$target" in
+      /*) path="$target" ;;
+      *)
+        parent="$(cd -P "$(dirname "$path")" 2>/dev/null && pwd)" || return 1
+        path="$parent/$target"
+        ;;
+    esac
+  done
+  parent="$(cd -P "$(dirname "$path")" 2>/dev/null && pwd)" || return 1
+  printf '%s/%s\n' "$parent" "$(basename "$path")"
+}
+
+# Return a PATH candidate other than ~/.local/bin. This lets us repair an old
+# Cortex fallback symlink after a managed installer has put a newer command
+# elsewhere on PATH, without ever replacing a regular user-owned file.
+find_non_local_cli() {
+  local name="$1" dir candidate old_ifs
+  old_ifs="$IFS"
+  IFS=":"
+  for dir in $PATH; do
+    [ -n "$dir" ] || dir="."
+    [ "$dir" = "$LOCAL_BIN" ] && continue
+    candidate="$dir/$name"
+    if [ -x "$candidate" ]; then
+      IFS="$old_ifs"
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  IFS="$old_ifs"
+  return 1
+}
+
+# The local app's resolver prefers these paths, so inspect the same locations
+# before terminal PATH. That prevents a custom fallback binary from being
+# silently bypassed/overwritten during an installer rerun.
+find_cli_bin() {
+  local name="$1" canonical="$2" candidate
+  for candidate in "$canonical" "$LOCAL_BIN/$name"; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  command -v "$name" 2>/dev/null || true
+}
+
+cli_is_npm_managed() {
+  local path="$1" package="$2" npm_root resolved
+  command -v npm >/dev/null 2>&1 || return 1
+  npm_root="$(npm root -g 2>/dev/null || true)"
+  [ -n "$npm_root" ] || return 1
+  resolved="$(resolve_cli_path "$path" 2>/dev/null || printf '%s' "$path")"
+  npm_root="$(resolve_cli_path "$npm_root" 2>/dev/null || printf '%s' "$npm_root")"
+  case "$resolved" in
+    "$npm_root/$package"/*) return 0 ;;
+  esac
+  return 1
+}
+
+cli_is_claude_native() {
+  local resolved
+  resolved="$(resolve_cli_path "$1" 2>/dev/null || true)"
+  case "$resolved" in
+    "$HOME/.local/share/claude/versions/"*) return 0 ;;
+  esac
+  return 1
+}
+
+cli_is_codex_native() {
+  local resolved
+  resolved="$(resolve_cli_path "$1" 2>/dev/null || true)"
+  case "$resolved" in
+    "$HOME/.codex/packages/standalone/releases/"*) return 0 ;;
+  esac
+  return 1
+}
+
+cli_is_agy_native() {
+  # Antigravity's official Unix installer owns this exact canonical path. A
+  # differently located agy is treated as externally managed.
+  [ "$(resolve_cli_path "$1" 2>/dev/null || true)" = "$LOCAL_BIN/agy" ]
+}
+
+cli_is_grok_native() {
+  local resolved root
+  resolved="$(resolve_cli_path "$1" 2>/dev/null || true)"
+  # The upstream installer always keeps downloaded artifacts under ~/.grok,
+  # even when GROK_BIN_DIR puts the launcher in a Cortex GROK_HOME override.
+  # Accept both locations so an existing selected launcher is updated rather
+  # than mistaken for an external executable.
+  for root in "$HOME/.grok/downloads" "$GROK_CLI_HOME/downloads"; do
+    case "$resolved" in
+      "$root/grok-"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+show_cli_version() {
+  local name="$1" bin="$2" version
+  [ -n "$bin" ] && [ -x "$bin" ] || { warn "$name is not available after this installer run"; return 0; }
+  version="$("$bin" --version 2>&1 | head -n 1 || true)"
+  version="${version//$'\r'/}"
+  if [ -n "$version" ]; then
+    ok "$name: $bin ($version)"
+  else
+    ok "$name: $bin"
+  fi
+}
+
+# Download the vendor installer before running it. Besides avoiding shell
+# quoting surprises, this keeps the outer `curl | bash` installer stdin intact.
+run_vendor_bash_installer() {
+  local label="$1" url="$2" tmp status=1
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "$label installer needs curl, but curl is unavailable"
+    return 1
+  fi
+  tmp="$(mktemp "${TMPDIR:-/tmp}/cortex-${label// /-}.XXXXXX")" || {
+    warn "could not create a temporary file for the $label installer"
+    return 1
+  }
+  if curl -fsSL --connect-timeout 15 --max-time 60 "$url" -o "$tmp"; then
+    chmod 700 "$tmp" 2>/dev/null || true
+    if bash "$tmp" </dev/null; then status=0; fi
+  else
+    warn "could not download the $label installer"
+  fi
+  rm -f "$tmp"
+  return "$status"
+}
+
+run_codex_vendor_installer() {
+  local tmp status=1
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "Codex installer needs curl, but curl is unavailable"
+    return 1
+  fi
+  tmp="$(mktemp "${TMPDIR:-/tmp}/cortex-codex.XXXXXX")" || {
+    warn "could not create a temporary file for the Codex installer"
+    return 1
+  }
+  if curl -fsSL --connect-timeout 15 --max-time 60 https://chatgpt.com/codex/install.sh -o "$tmp"; then
+    chmod 700 "$tmp" 2>/dev/null || true
+    # Never prompt from a rerunnable Cortex installer. The official installer
+    # still verifies the release archive and updates atomically.
+    if CODEX_RELEASE=latest CODEX_NON_INTERACTIVE=1 bash "$tmp" </dev/null; then status=0; fi
+  else
+    warn "could not download the Codex installer"
+  fi
+  rm -f "$tmp"
+  return "$status"
+}
 
 # Guarantee ~/.local/bin/<name> exists for a CLI the app drives.
 #
@@ -126,23 +434,48 @@ LOCAL_BIN="$HOME/.local/bin"
 # dies with "spawn /Users/<user>/.local/bin/<name> ENOENT" at sign-in.
 # Symlink whatever the CLI resolved to into ~/.local/bin so that fallback holds.
 ensure_local_bin_link() {
-  local name="$1" resolved
+  local name="$1" preferred="${2:-}" resolved local_path existing_real resolved_real
   mkdir -p "$LOCAL_BIN"
   hash -r 2>/dev/null || true
-  if [ -x "$LOCAL_BIN/$name" ]; then
-    ok "$name available at $LOCAL_BIN/$name (app fallback path)"
-    return 0
+  local_path="$LOCAL_BIN/$name"
+  if [ -n "$preferred" ] && [ -x "$preferred" ]; then
+    resolved="$preferred"
+  else
+    resolved="$(find_non_local_cli "$name" 2>/dev/null || true)"
+    [ -n "$resolved" ] || resolved="$(command -v "$name" 2>/dev/null || true)"
   fi
-  resolved="$(command -v "$name" 2>/dev/null || true)"
   if [ -z "$resolved" ]; then
-    warn "$name not found on PATH — the app expects it at $LOCAL_BIN/$name"
+    if [ -x "$local_path" ]; then
+      ok "$name available at $local_path (app fallback path)"
+    else
+      warn "$name not found on PATH — the app expects it at $local_path"
+    fi
     return 0
   fi
-  if [ "$resolved" != "$LOCAL_BIN/$name" ]; then
-    ln -sf "$resolved" "$LOCAL_BIN/$name" \
-      && ok "linked $name → $LOCAL_BIN/$name (was $resolved)" \
-      || warn "could not link $name into $LOCAL_BIN — sign-in may fail with ENOENT"
+  if [ -e "$local_path" ] || [ -L "$local_path" ]; then
+    if [ ! -L "$local_path" ]; then
+      if [ "$local_path" != "$resolved" ]; then
+        warn "leaving user-owned $local_path in place (not replacing it with $resolved)"
+      else
+        ok "$name available at $local_path (app fallback path)"
+      fi
+      return 0
+    fi
+    existing_real="$(resolve_cli_path "$local_path" 2>/dev/null || true)"
+    resolved_real="$(resolve_cli_path "$resolved" 2>/dev/null || true)"
+    if [ -n "$resolved_real" ] && [ "$existing_real" != "$resolved_real" ] && [ "$resolved" != "$local_path" ]; then
+      ln -sfn "$resolved" "$local_path" \
+        && ok "refreshed $name link → $local_path (now $resolved)" \
+        || warn "could not refresh $name link in $LOCAL_BIN — sign-in may use an older CLI"
+    else
+      ok "$name available at $local_path (app fallback path)"
+    fi
+    return 0
   fi
+  [ "$resolved" = "$local_path" ] && { ok "$name available at $local_path (app fallback path)"; return 0; }
+  ln -s "$resolved" "$local_path" \
+    && ok "linked $name → $local_path (was $resolved)" \
+    || warn "could not link $name into $LOCAL_BIN — sign-in may fail with ENOENT"
 }
 
 # Ensure Node.js + npm are available.
@@ -249,7 +582,25 @@ APP_ZIP="Cortex-${ARCH}.zip"
 SUPPORT_TAR="support.tar.gz"
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  if [ -n "$APP_BACKUP" ] && [ -d "$APP_BACKUP" ]; then
+    if [ ! -d "$APP_PATH" ]; then
+      mv "$APP_BACKUP" "$APP_PATH" 2>/dev/null || true
+    else
+      rm -rf "$APP_BACKUP"
+    fi
+  fi
+  if [ "$IN_APP_UPDATE" = "1" ] \
+     && [ -n "$APP_RELAUNCH_REQUIRED" ] \
+     && [ -z "$APP_RELAUNCHED" ]; then
+    relaunch_installed_app || true
+  fi
+  rm -rf "$WORK"
+  exit "$rc"
+}
+trap cleanup EXIT
 
 # Resolve the release and its assets (skipped entirely in local mode).
 #   • Default (no token): resolve the PUBLIC dist repo's latest release through
@@ -325,29 +676,70 @@ dl() {
     # --speed-limit/--speed-time abort a genuinely stalled transfer (sustained
     # near-zero throughput) without penalizing a slow-but-active download, which
     # a hard --max-time would.
-    curl -fL --progress-bar --connect-timeout 15 --speed-limit 1024 --speed-time 30 \
+    retry 3 curl -fL --progress-bar --connect-timeout 15 --speed-limit 1024 --speed-time 30 --continue-at - \
       -H "Authorization: Bearer $TOKEN" \
       -H "Accept: application/octet-stream" \
       "https://api.github.com/repos/${REPO}/releases/assets/${id}" -o "$dest" \
-      || die "download failed: $name (no response or the connection stalled)"
+      || die "download failed: $name (no response or the connection stalled after 3 attempts)"
   else
     url="https://github.com/${PUBLIC_REPO}/releases/download/${TAG}/${name}"
-    curl -fL --progress-bar --connect-timeout 15 --speed-limit 1024 --speed-time 30 "$url" -o "$dest" \
-      || die "download failed: $name (no response or the connection stalled)"
+    retry 3 curl -fL --progress-bar --connect-timeout 15 --speed-limit 1024 --speed-time 30 --continue-at - "$url" -o "$dest" \
+      || die "download failed: $name (no response or the connection stalled after 3 attempts)"
   fi
 }
 
-# ── Install the .app ────────────────────────────────────
-step "Installing ${APP_NAME}.app"
+# ── Prepare update assets while the old app remains usable ───────────────
+step "Preparing update assets"
 dl "$APP_ZIP" "$WORK/$APP_ZIP"
 ok "downloaded $APP_ZIP"
 ditto -x -k "$WORK/$APP_ZIP" "$WORK/app" || die "could not unzip $APP_ZIP"
 SRC_APP="$(find "$WORK/app" -maxdepth 2 -name '*.app' -type d | head -n1)"
 [ -n "$SRC_APP" ] || die "no .app found inside $APP_ZIP"
+dl "$SUPPORT_TAR" "$WORK/$SUPPORT_TAR"
+mkdir -p "$WORK/support"
+tar -xzf "$WORK/$SUPPORT_TAR" -C "$WORK/support" || die "could not extract $SUPPORT_TAR"
+ok "prepared app + support files"
+
+# ── Install the .app ────────────────────────────────────
+step "Installing ${APP_NAME}.app"
+[ "$IN_APP_UPDATE" = "1" ] && APP_RELAUNCH_REQUIRED=1
 quit_running_app
 refresh_launchservices unregister
-rm -rf "$APP_PATH"
-mv "$SRC_APP" "$APP_PATH" || die "could not move app to /Applications (permissions?)"
+# /Applications is writable by admins without sudo, but a locked bundle, a
+# managed (MDM) volume, or a non-admin account will block the swap. Check up
+# front so the failure names the real cause instead of a generic "permissions?".
+APP_DIR="$(dirname "$APP_PATH")"
+[ -w "$APP_DIR" ] || die "cannot write to $APP_DIR — install as an admin user, or move ${APP_NAME}.app there manually from $WORK/app"
+if [ -e "$APP_PATH" ]; then
+  # Keep the previous bundle beside the destination until the replacement is
+  # complete. A failed copy can then restore the runnable old app before the
+  # relaunch failsafe fires.
+  APP_BACKUP="$APP_DIR/.${APP_NAME}.app.cortex-update-backup-$$"
+  rm -rf "$APP_BACKUP"
+  if ! mv "$APP_PATH" "$APP_BACKUP" 2>/dev/null; then
+    quit_running_app
+    mv "$APP_PATH" "$APP_BACKUP" 2>/dev/null \
+      || die "could not move the old ${APP_NAME}.app for replacement — quit ${APP_NAME} fully, then re-run the installer"
+  fi
+fi
+# Prefer mv (atomic on the same volume); fall back to a ditto copy when the
+# source and /Applications live on different volumes, where mv can fail.
+if ! mv "$SRC_APP" "$APP_PATH" 2>/dev/null; then
+  rm -rf "$APP_PATH" 2>/dev/null || true
+  if ! ditto "$SRC_APP" "$APP_PATH"; then
+    rm -rf "$APP_PATH" 2>/dev/null || true
+    if [ -n "$APP_BACKUP" ] && [ -d "$APP_BACKUP" ]; then
+      if mv "$APP_BACKUP" "$APP_PATH" 2>/dev/null; then
+        APP_BACKUP=""
+      fi
+    fi
+    die "could not install the app into $APP_DIR — restored the previous app when possible; check that the volume isn't full or read-only, then re-run"
+  fi
+fi
+if [ -n "$APP_BACKUP" ] && [ -d "$APP_BACKUP" ]; then
+  rm -rf "$APP_BACKUP"
+  APP_BACKUP=""
+fi
 ok "installed → $APP_PATH"
 refresh_launchservices register
 INSTALLED_TAG="$(installed_build_tag)"
@@ -363,10 +755,17 @@ xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null && ok "cleared quarantine
 # ── Provision data dir ──────────────────────────────────
 step "Provisioning $DATA_DIR"
 mkdir -p "$DATA_DIR"
-dl "$SUPPORT_TAR" "$WORK/$SUPPORT_TAR"
-tar -xzf "$WORK/$SUPPORT_TAR" -C "$DATA_DIR" || die "could not extract $SUPPORT_TAR"
+ditto "$WORK/support" "$DATA_DIR" || die "could not install the prepared support files"
 chmod +x "$DATA_DIR"/*.command "$DATA_DIR"/*.sh 2>/dev/null || true
 ok "extracted bot + support files"
+
+# The packaged app is self-contained. Bring the new UI back immediately after
+# the atomic bundle/support swap; the detached installer keeps running and the
+# relaunched app resumes progress from update.log while dependencies finish.
+if [ "$IN_APP_UPDATE" = "1" ]; then
+  relaunch_installed_app \
+    || warn "${APP_NAME} has not relaunched yet; the exit failsafe will retry"
+fi
 
 # ── Bun (required for Node deps + the bot) ──────────────
 step "Bun"
@@ -374,53 +773,347 @@ if command -v bun >/dev/null 2>&1; then
   ok "bun: $(command -v bun)"
 else
   warn "bun not found — installing…"
-  curl -fsSL --connect-timeout 15 --max-time 30 https://bun.sh/install | bash || die "bun install failed"
+  retry 3 bash -c 'curl -fsSL --connect-timeout 15 --max-time 60 https://bun.sh/install | bash' \
+    || die "bun install failed (could not download from bun.sh after 3 attempts — check your network, then re-run)"
   export PATH="$HOME/.bun/bin:$PATH"
-  command -v bun >/dev/null 2>&1 && ok "bun installed" || die "bun still not on PATH"
+  command -v bun >/dev/null 2>&1 && ok "bun installed" || die "bun still not on PATH — add \$HOME/.bun/bin to PATH, then re-run"
 fi
 
-# ── Node.js + npm (runtime for MCP servers; installs the Claude/Codex CLIs) ─
+# ── Node.js + npm (runtime for MCP servers and npm-managed provider CLIs) ──
 step "Node.js"
-ensure_node || warn "continuing without Node — the Claude/Codex CLIs and node-based MCP servers may be unavailable"
+ensure_node || warn "continuing without Node — npm-managed provider CLIs and node-based MCP servers may be unavailable"
 
 # ── Delegate Node + Python deps + config to setup.command ─
 # setup.command (run from the data dir) installs Node deps via bun, installs the
 # Python libs, and writes ~/.cortex-ai-sessions.env → the data dir. Reusing it keeps
 # dependency logic in one place.
 step "Dependencies (delegating to setup.command)"
-( cd "$DATA_DIR" && bash setup.command ) || warn "setup.command reported problems (see above)"
+# Snapshot config-file overrides before setup.command rewrites the shared config;
+# restore them after delegation as well because the support bundle can predate
+# the setup-side preservation logic.
+PRESERVED_CONFIG_BACKUP="$(capture_preserved_config_lines)"
+load_cli_overrides_from_config
+refresh_grok_cli_home
+( cd "$DATA_DIR" && CORTEX_RELEASE_INSTALL=1 bash setup.command ) || warn "setup.command reported problems (see above)"
+restore_cli_override_lines "$CLI_OVERRIDE_BACKUP"
+restore_preserved_config_lines "$PRESERVED_CONFIG_BACKUP"
+load_cli_overrides_from_config
+refresh_grok_cli_home
 
-# ── Claude CLI ──────────────────────────────────────────
-step "Claude CLI"
-if command -v claude >/dev/null 2>&1; then
-  ok "claude: $(command -v claude)"
-elif command -v npm >/dev/null 2>&1; then
-  warn "claude not found — installing @anthropic-ai/claude-code…"
-  npm install -g @anthropic-ai/claude-code && ok "Claude CLI installed" \
-    || warn "install failed — run: npm install -g @anthropic-ai/claude-code"
-else
-  warn "claude not found and npm unavailable — install Node, then: npm install -g @anthropic-ai/claude-code"
-fi
-# The GUI-launched app resolves claude at ~/.local/bin/claude (see findClaudeBin);
-# npm-global installs land elsewhere, so link it there or sign-in fails w/ ENOENT.
-ensure_local_bin_link claude
+# ── Managed realtime speech model ──────────────────────
+# Prefer MLX only where upstream supports it. The provisioner retries MLX and
+# then installs OpenAI Whisper in the same managed runtime if MLX's package or
+# Hugging Face model cannot be prepared. A speech failure must not prevent the
+# text application from installing; Live voice exposes the same repair action.
+step "Realtime speech model"
+STT_RUNTIME_DIR="$HOME/Library/Application Support/Cortex/voice-stt"
+STT_PROVISIONER="$APP_PATH/Contents/Resources/standalone/scripts/provision-realtime-stt.sh"
+STT_DAEMON="$APP_PATH/Contents/Resources/standalone/scripts/stt_daemon.py"
+STT_QWEN_PYTHON="$HOME/.cortex-ai-sessions/voice-tts/.venv/bin/python3"
+STT_CONFIG_TTS_PYTHON=""
+STT_CONFIG_PYTHON=""
 
-# ── Codex CLI ───────────────────────────────────────────
-# The bot can auto-reply with Codex as well as Claude. The @openai/codex npm
-# package drops the standalone binary and symlinks ~/.local/bin/codex, which is
-# where lib/paths.ts (findCodexBin) and the bot look for it.
-step "Codex CLI"
-if command -v codex >/dev/null 2>&1; then
-  ok "codex: $(command -v codex)"
-elif command -v npm >/dev/null 2>&1; then
-  warn "codex not found — installing @openai/codex…"
-  npm install -g @openai/codex && ok "Codex CLI installed" \
-    || warn "install failed — run: npm install -g @openai/codex"
-else
-  warn "codex not found and npm unavailable — install Node, then: npm install -g @openai/codex"
+stt_python_is_compatible() {
+  [ -n "$1" ] && [ -x "$1" ] \
+    && "$1" -c 'import platform, sys
+expected = "arm64" if sys.argv[1] == "arm64" else "x86_64"
+ok = platform.system() == "Darwin" and platform.machine() == expected and (3, 10) <= sys.version_info[:2] < (3, 13)
+sys.exit(0 if ok else 1)' "$ARCH" >/dev/null 2>&1
+}
+
+stt_macos_supports_mlx() {
+  local version major remainder minor
+  version="$(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
+  major="${version%%.*}"
+  remainder="${version#*.}"
+  minor="${remainder%%.*}"
+  [[ "$major" =~ ^[0-9]+$ ]] && [[ "$minor" =~ ^[0-9]+$ ]] || return 1
+  [ "$major" -gt 13 ] || { [ "$major" -eq 13 ] && [ "$minor" -ge 5 ]; }
+}
+
+stt_uv_is_compatible() {
+  local description
+  [ -n "$1" ] && [ -x "$1" ] || return 1
+  description="$(/usr/bin/file -L "$1" 2>/dev/null || true)"
+  if [ "$ARCH" = "arm64" ]; then
+    [[ "$description" == *arm64* ]]
+  else
+    [[ "$description" == *x86_64* ]]
+  fi
+}
+
+# setup.command normally leaves a native Python 3.10–3.12 Qwen venv behind.
+# Read its persisted path and PYTHON_BIN as inert values in case either points
+# somewhere else; never source the credential-bearing config file.
+if [ -f "$CONFIG" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ^(CORTEX_VOICE_TTS_PYTHON|PYTHON_BIN)[[:space:]]*=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      case "$value" in
+        \"*\") value="${value#\"}"; value="${value%\"}" ;;
+        \'*\') value="${value#\'}"; value="${value%\'}" ;;
+      esac
+      if [ "$key" = "CORTEX_VOICE_TTS_PYTHON" ]; then
+        STT_CONFIG_TTS_PYTHON="$value"
+      else
+        STT_CONFIG_PYTHON="$value"
+      fi
+    fi
+  done < "$CONFIG"
 fi
-# Same GUI-PATH fallback as claude: findCodexBin resolves ~/.local/bin/codex.
-ensure_local_bin_link codex
+
+STT_BASE_PYTHON=""
+for candidate in \
+  "${CORTEX_VOICE_PYTHON:-}" \
+  "${CORTEX_VOICE_TTS_PYTHON:-}" \
+  "$STT_CONFIG_TTS_PYTHON" \
+  "$STT_QWEN_PYTHON" \
+  "${PYTHON_BIN:-}" \
+  "$STT_CONFIG_PYTHON" \
+  "$(command -v python3.12 || true)" \
+  "$(command -v python3.11 || true)" \
+  "$(command -v python3.10 || true)" \
+  "$HOME/.local/bin/python3.12" \
+  /opt/homebrew/bin/python3.12 \
+  /usr/local/bin/python3.12 \
+  /opt/homebrew/bin/python3.11 \
+  /usr/local/bin/python3.11 \
+  /opt/homebrew/bin/python3.10 \
+  /usr/local/bin/python3.10 \
+  /opt/homebrew/bin/python3 \
+  /usr/local/bin/python3 \
+  /usr/bin/python3 \
+  "$(command -v python3 || true)"; do
+  if stt_python_is_compatible "$candidate"; then
+    STT_BASE_PYTHON="$candidate"
+    break
+  fi
+done
+
+# A clean Mac may have only Apple's older system Python. Bootstrap uv and its
+# architecture-native Python 3.12 as a final managed base instead of failing
+# the entire Cortex installation.
+if [ -z "$STT_BASE_PYTHON" ]; then
+  STT_UV="$(command -v uv || true)"
+  for candidate in "$STT_UV" "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+    stt_uv_is_compatible "$candidate" && { STT_UV="$candidate"; break; }
+  done
+  if ! stt_uv_is_compatible "$STT_UV"; then
+    echo "  installing uv to provision a native Python 3.12 speech runtime…"
+    if [ "$ARCH" = "arm64" ]; then
+      curl --proto '=https' --tlsv1.2 -LsSf https://astral.sh/uv/install.sh \
+        | env UV_NO_MODIFY_PATH=1 arch -arm64 /bin/sh \
+        || warn "uv installation failed; Live voice can be repaired later"
+    else
+      curl --proto '=https' --tlsv1.2 -LsSf https://astral.sh/uv/install.sh \
+        | env UV_NO_MODIFY_PATH=1 /bin/sh \
+        || warn "uv installation failed; Live voice can be repaired later"
+    fi
+    STT_UV=""
+    for candidate in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+      stt_uv_is_compatible "$candidate" && { STT_UV="$candidate"; break; }
+    done
+  fi
+  if stt_uv_is_compatible "$STT_UV"; then
+    echo "  provisioning managed Python 3.12 for realtime speech…"
+    "$STT_UV" python install 3.12 >/dev/null \
+      || warn "managed Python 3.12 download failed"
+    STT_UV_PYTHON="$("$STT_UV" python find 3.12 2>/dev/null || true)"
+    stt_python_is_compatible "$STT_UV_PYTHON" && STT_BASE_PYTHON="$STT_UV_PYTHON"
+  fi
+fi
+
+STT_ENGINE="whisper"
+if [ "$ARCH" = "arm64" ] && stt_macos_supports_mlx; then
+  STT_ENGINE="mlx"
+elif [ "$ARCH" = "arm64" ]; then
+  ok "this macOS version does not support MLX — selecting managed OpenAI Whisper"
+else
+  ok "Intel Mac detected — selecting managed OpenAI Whisper"
+fi
+
+if [ ! -f "$STT_PROVISIONER" ] || [ ! -f "$STT_DAEMON" ]; then
+  warn "the installed app is missing realtime speech support files; text features remain available"
+elif ! stt_python_is_compatible "$STT_BASE_PYTHON"; then
+  warn "no native Python 3.10–3.12 runtime is available; install completed without local speech recognition"
+elif CORTEX_STT_ENGINE="$STT_ENGINE" bash "$STT_PROVISIONER" \
+  "$STT_RUNTIME_DIR" \
+  "$STT_BASE_PYTHON" \
+  "$STT_DAEMON" \
+  "${INSTALLED_TAG:-unknown}"; then
+  STT_INSTALLED_ENGINE="$(awk -F= '$1 == "engine" { print $2; exit }' "$STT_RUNTIME_DIR/release-provisioned" 2>/dev/null || true)"
+  ok "verified managed realtime speech (${STT_INSTALLED_ENGINE:-$STT_ENGINE})"
+else
+  warn "local speech provisioning failed; Cortex installed and Live voice can retry from the app"
+fi
+
+# ── Managed local CLI updates ───────────────────────────
+# A rerunnable Cortex installer is an explicit request to bring the local
+# providers it owns to their current stable releases. Never replace a CLI that
+# was selected via an explicit *_BIN override or that lives outside the vendor
+# and npm locations recognised below: those are user-managed installations.
+
+update_claude_cli() {
+  local bin
+  step "Claude CLI"
+  if cli_override_is_set CLAUDE_BIN; then
+    warn "CLAUDE_BIN is set; leaving that user-managed Claude CLI unchanged"
+    return 0
+  fi
+  bin="$(find_cli_bin claude "$LOCAL_BIN/claude")"
+  if [ -z "$bin" ]; then
+    warn "claude not found — installing the latest stable Claude CLI…"
+    if run_vendor_bash_installer "Claude-CLI" https://claude.ai/install.sh; then
+      ok "Claude CLI installed via the official installer"
+    elif command -v npm >/dev/null 2>&1; then
+      warn "official Claude installer failed; trying npm's latest package…"
+      npm install -g '@anthropic-ai/claude-code@latest' </dev/null \
+        && ok "Claude CLI installed via npm" \
+        || warn "npm fallback failed — run: npm install -g @anthropic-ai/claude-code"
+    else
+      warn "Claude CLI could not be installed — install it from https://claude.ai/install"
+    fi
+  elif cli_is_npm_managed "$bin" '@anthropic-ai/claude-code'; then
+    warn "updating npm-managed Claude CLI…"
+    npm install -g '@anthropic-ai/claude-code@latest' </dev/null \
+      && ok "Claude CLI updated via npm" \
+      || warn "Claude npm update failed — keeping the existing CLI"
+  elif cli_is_claude_native "$bin"; then
+    warn "checking for a Claude CLI update…"
+    if "$bin" update </dev/null; then
+      ok "Claude CLI update completed"
+    else
+      warn "claude update failed; retrying with the official installer…"
+      run_vendor_bash_installer "Claude-CLI" https://claude.ai/install.sh \
+        && ok "Claude CLI updated via the official installer" \
+        || warn "Claude CLI update failed — keeping the existing CLI"
+    fi
+  else
+    warn "leaving externally managed Claude CLI unchanged: $bin"
+  fi
+  hash -r 2>/dev/null || true
+  bin="$(find_cli_bin claude "$LOCAL_BIN/claude")"
+  show_cli_version "claude" "$bin"
+  # The GUI-launched app resolves claude at ~/.local/bin/claude. Only refresh a
+  # symlink; a regular file at that path remains user-owned.
+  ensure_local_bin_link claude "$bin"
+}
+
+update_codex_cli() {
+  local bin
+  step "Codex CLI"
+  if cli_override_is_set CODEX_BIN; then
+    warn "CODEX_BIN is set; leaving that user-managed Codex CLI unchanged"
+    return 0
+  fi
+  bin="$(find_cli_bin codex "$LOCAL_BIN/codex")"
+  if [ -z "$bin" ]; then
+    warn "codex not found — installing the latest stable Codex CLI…"
+    if run_codex_vendor_installer; then
+      ok "Codex CLI installed via the official installer"
+    elif command -v npm >/dev/null 2>&1; then
+      warn "official Codex installer failed; trying npm's latest package…"
+      npm install -g '@openai/codex@latest' </dev/null \
+        && ok "Codex CLI installed via npm" \
+        || warn "npm fallback failed — run: npm install -g @openai/codex"
+    else
+      warn "Codex CLI could not be installed — install it from https://chatgpt.com/codex/install.sh"
+    fi
+  elif cli_is_npm_managed "$bin" '@openai/codex'; then
+    warn "updating npm-managed Codex CLI…"
+    npm install -g '@openai/codex@latest' </dev/null \
+      && ok "Codex CLI updated via npm" \
+      || warn "Codex npm update failed — keeping the existing CLI"
+  elif cli_is_codex_native "$bin"; then
+    warn "updating the official Codex CLI…"
+    run_codex_vendor_installer \
+      && ok "Codex CLI update completed" \
+      || warn "Codex CLI update failed — keeping the existing CLI"
+  else
+    warn "leaving externally managed Codex CLI unchanged: $bin"
+  fi
+  hash -r 2>/dev/null || true
+  bin="$(find_cli_bin codex "$LOCAL_BIN/codex")"
+  show_cli_version "codex" "$bin"
+  # Same GUI-PATH fallback as Claude. This also repairs an older symlink when
+  # a managed updater has provided a newer target elsewhere on PATH.
+  ensure_local_bin_link codex "$bin"
+}
+
+update_agy_cli() {
+  local bin
+  step "Antigravity CLI"
+  if cli_override_is_set AGY_BIN; then
+    warn "AGY_BIN is set; leaving that user-managed Antigravity CLI unchanged"
+    return 0
+  fi
+  bin="$(find_cli_bin agy "$LOCAL_BIN/agy")"
+  if [ -z "$bin" ]; then
+    warn "agy not found — installing the latest stable Antigravity CLI…"
+    run_vendor_bash_installer "Antigravity-CLI" https://antigravity.google/cli/install.sh \
+      && ok "Antigravity CLI installed via the official installer" \
+      || warn "Antigravity CLI install failed — keeping Cortex installation running"
+  elif cli_is_agy_native "$bin"; then
+    # The vendor's bootstrap script deliberately does not replace a preexisting
+    # agy binary; its native updater is the supported rerun/update mechanism.
+    warn "checking for an Antigravity CLI update…"
+    "$bin" update </dev/null \
+      && ok "Antigravity CLI update completed" \
+      || warn "Antigravity CLI update failed — keeping the existing CLI"
+  else
+    warn "leaving externally managed Antigravity CLI unchanged: $bin"
+  fi
+  hash -r 2>/dev/null || true
+  bin="$(find_cli_bin agy "$LOCAL_BIN/agy")"
+  show_cli_version "agy" "$bin"
+}
+
+update_grok_cli() {
+  local bin
+  step "Grok CLI"
+  if cli_override_is_set GROK_BIN; then
+    warn "GROK_BIN is set; leaving that user-managed Grok CLI unchanged"
+    return 0
+  fi
+  bin="$(find_cli_bin grok "$GROK_CLI_BIN_DIR/grok")"
+  if [ -z "$bin" ]; then
+    warn "grok not found — installing the latest stable Grok CLI…"
+    GROK_CHANNEL=stable GROK_BIN_DIR="$GROK_CLI_BIN_DIR" \
+      run_vendor_bash_installer "Grok-CLI" https://x.ai/cli/install.sh \
+      && ok "Grok CLI installed via the official installer" \
+      || warn "Grok CLI install failed — keeping Cortex installation running"
+  elif cli_is_npm_managed "$bin" '@xai-official/grok'; then
+    warn "updating npm-managed Grok CLI…"
+    npm install -g '@xai-official/grok@latest' </dev/null \
+      && ok "Grok CLI updated via npm" \
+      || warn "Grok npm update failed — keeping the existing CLI"
+  elif cli_is_grok_native "$bin"; then
+    warn "checking for a Grok CLI update…"
+    "$bin" update --check --json </dev/null \
+      || warn "Grok CLI could not complete its update check; attempting an update in its selected channel"
+    "$bin" update </dev/null \
+      && ok "Grok CLI update completed" \
+      || warn "Grok CLI update failed — keeping the existing CLI"
+  else
+    warn "leaving externally managed Grok CLI unchanged: $bin"
+  fi
+  hash -r 2>/dev/null || true
+  bin="$(find_cli_bin grok "$GROK_CLI_BIN_DIR/grok")"
+  show_cli_version "grok" "$bin"
+}
+
+if [ "$IN_APP_UPDATE" = "1" ]; then
+  step "Provider CLI updates"
+  ok "skipped during app self-update; provider updates remain explicit in About"
+else
+  update_claude_cli
+  update_codex_cli
+  update_agy_cli
+  update_grok_cli
+fi
 
 # ── Computer-control MCP server (mouse / keyboard / screen) ─
 # Cortex injects this MCP server per opted-in session. Do not register it at
@@ -525,4 +1218,9 @@ echo "  WhatsApp bot:     open \"$DATA_DIR/start-bot.command\""
 echo "  Shared state:     $DATA_DIR  (settings.json, sessions.json)"
 echo "  Install log:      $LOG_FILE"
 echo
-open "$APP_PATH" 2>/dev/null || true
+if [ "$IN_APP_UPDATE" = "1" ]; then
+  relaunch_installed_app \
+    || die "the update finished, but ${APP_NAME} could not be relaunched automatically"
+else
+  open "$APP_PATH" 2>/dev/null || true
+fi
