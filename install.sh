@@ -9,7 +9,7 @@
 # Installs the app to /Applications, provisions a data dir (~/.cortex-ai-sessions)
 # with the bot + support files, and installs every runtime library (Node deps
 # via Bun, Python cryptography/tls-client, a managed MLX-or-Whisper realtime
-# speech model, a managed local Qwen Jarvis voice, ffmpeg,
+# speech model, a managed local Pocket Jarvis voice, ffmpeg,
 # Google Chrome, and the Claude, Codex, Antigravity, and Grok CLIs Cortex drives).
 # Unsigned: the app's quarantine flag is stripped so
 # Gatekeeper doesn't block it. Safe to re-run.
@@ -22,15 +22,17 @@
 # Overrides (env):
 #   GH_TOKEN / GITHUB_TOKEN / CORTEX_TOKEN   token → pull from PRIVATE
 #                              source repo (optional; default is tokenless public).
+#   CORTEX_SOURCE_REPO  override the authenticated private repo (owner/name).
 #   CORTEX_PUBLIC_REPO  override the public dist repo (owner/name).
 #   CORTEX_VERSION    pin a release tag (default: latest)
-#   CORTEX_LOCAL_DIR  install from local artifacts in this dir instead
-#                              of downloading (expects Cortex-<arch>.zip
-#                              and support.tar.gz) — for testing; no token needed.
+#   CORTEX_LOCAL_DIR  install Cortex app/support artifacts from this directory
+#                              instead of downloading them. Pocket's model
+#                              remains a fixed verified download unless it is
+#                              also present here — for testing; no token needed.
 
 set -euo pipefail
 
-REPO="appfactory123/claude-sessions"
+REPO="${CORTEX_SOURCE_REPO:-appfactory123/claude-sessions}"
 PUBLIC_REPO="${CORTEX_PUBLIC_REPO:-appfactory123/cortex-ai-sessions-dist}"
 APP_NAME="Cortex"
 APP_PATH="/Applications/${APP_NAME}.app"
@@ -203,7 +205,7 @@ load_cli_overrides_from_config() {
 # newer than the release support bundle it downloads, so that bundle may still
 # contain an older setup.command which rewrites the config without preserving
 # user-owned CLI paths or voice credentials/settings. Never source these values.
-PRESERVED_CONFIG_KEYS='PYTHON_BIN|CLAUDE_BIN|CODEX_BIN|AGY_BIN|GROK_BIN|GROK_HOME|KIMI_BIN|KIMI_SHARE_DIR|UV_BIN|CORTEX_OPENAI_API_KEY|OPENAI_API_KEY|CORTEX_ELEVENLABS_API_KEY|ELEVENLABS_API_KEY|CORTEX_VOICE_TTS_PROVIDER|CORTEX_VOICE_TTS_PYTHON|CORTEX_VOICE_TTS_DEVICE|CORTEX_VOICE_TTS_MODEL|CORTEX_VOICE_TTS_VOICE|CORTEX_ELEVENLABS_VOICE_ID|CORTEX_ELEVENLABS_MODEL|CORTEX_VOICE_TTS_LOCAL_VOICE|CORTEX_VOICE_TTS_QWEN_MODEL|CORTEX_VOICE_TTS_QWEN_REVISION|CORTEX_VOICE_TTS_QWEN_CACHE|CORTEX_VOICE_TTS_QWEN_PROFILE|CORTEX_VOICE_TTS_QWEN_VOICE_PROMPT|CORTEX_VOICE_DUPLEX|CORTEX_VOICE_TTS_CAPABILITY_READY_WAIT_MS|CORTEX_VOICE_TTS_LOCAL_READY_GRACE_MS|CORTEX_VOICE_TTS_DAEMON_READY_TIMEOUT_MS|CORTEX_VOICE_TTS_LOCAL_RESPONSE_TIMEOUT_MS'
+PRESERVED_CONFIG_KEYS='PYTHON_BIN|CLAUDE_BIN|CODEX_BIN|AGY_BIN|GROK_BIN|GROK_HOME|KIMI_BIN|KIMI_SHARE_DIR|UV_BIN|CORTEX_OPENAI_API_KEY|OPENAI_API_KEY|CORTEX_ELEVENLABS_API_KEY|ELEVENLABS_API_KEY|CORTEX_VOICE_TTS_PROVIDER|CORTEX_VOICE_TTS_PYTHON|CORTEX_VOICE_TTS_DEVICE|CORTEX_VOICE_TTS_MODEL|CORTEX_VOICE_TTS_VOICE|CORTEX_ELEVENLABS_VOICE_ID|CORTEX_ELEVENLABS_MODEL|CORTEX_VOICE_TTS_LOCAL_VOICE|CORTEX_VOICE_TTS_POCKET_CACHE|CORTEX_VOICE_TTS_QWEN_MODEL|CORTEX_VOICE_TTS_QWEN_REVISION|CORTEX_VOICE_TTS_QWEN_CACHE|CORTEX_VOICE_TTS_QWEN_PROFILE|CORTEX_VOICE_TTS_QWEN_VOICE_PROMPT|CORTEX_VOICE_DUPLEX|CORTEX_VOICE_TTS_CAPABILITY_READY_WAIT_MS|CORTEX_VOICE_TTS_LOCAL_READY_GRACE_MS|CORTEX_VOICE_TTS_DAEMON_READY_TIMEOUT_MS|CORTEX_VOICE_TTS_LOCAL_RESPONSE_TIMEOUT_MS'
 capture_preserved_config_lines() {
   [ -f "$CONFIG" ] || return 0
   local line key value
@@ -580,6 +582,13 @@ ok "macOS / $ARCH"
 
 APP_ZIP="Cortex-${ARCH}.zip"
 SUPPORT_TAR="support.tar.gz"
+POCKET_MODEL_ASSET="Pocket-English-model.tar.gz"
+POCKET_MODEL_REPOSITORY="appfactory123/pocket-tts-model-weight-dist"
+POCKET_MODEL_RELEASE_TAG="pocket-tts-v2.1.0-english-1"
+POCKET_MODEL_RELEASE_ASSET_ID="494264404"
+POCKET_MODEL_ROOT="$HOME/.cortex-ai-sessions/voice-tts/pocket-model"
+POCKET_MODEL_SHA256="473f47d99560bd50eb8b4509d3cacfe7f316ab20bdca86505403a2e6a936a6e9"
+POCKET_TOKENIZER_SHA256="d461765ae179566678c93091c5fa6f2984c31bbe990bf1aa62d92c64d91bc3f6"
 
 WORK="$(mktemp -d)"
 cleanup() {
@@ -688,6 +697,28 @@ dl() {
   fi
 }
 
+# dl_pocket_model <dest> — Pocket's immutable public release is deliberately
+# separate from each Cortex app release. This keeps the large weight asset out
+# of app updates while the pinned release asset and file checksums keep the
+# model input deterministic. A local artifact remains available for installer
+# testing.
+dl_pocket_model() {
+  local dest="$1" url
+  if [ -n "${CORTEX_LOCAL_DIR:-}" ] && [ -f "$CORTEX_LOCAL_DIR/$POCKET_MODEL_ASSET" ]; then
+    cp "$CORTEX_LOCAL_DIR/$POCKET_MODEL_ASSET" "$dest" \
+      || die "could not copy local Pocket model artifact"
+    return 0
+  fi
+  # GitHub's asset API resolves the immutable public asset to a short-lived
+  # storage redirect. It does not require a token and avoids app-release asset
+  # discovery or the regular release page's cache propagation delay.
+  url="https://api.github.com/repos/${POCKET_MODEL_REPOSITORY}/releases/assets/${POCKET_MODEL_RELEASE_ASSET_ID}"
+  retry 3 curl -fL --progress-bar --connect-timeout 15 --speed-limit 1024 --speed-time 30 --continue-at - \
+    -H "Accept: application/octet-stream" \
+    "$url" -o "$dest" \
+    || die "could not download the verified Pocket model release (${POCKET_MODEL_REPOSITORY}@${POCKET_MODEL_RELEASE_TAG})"
+}
+
 # ── Prepare update assets while the old app remains usable ───────────────
 step "Preparing update assets"
 dl "$APP_ZIP" "$WORK/$APP_ZIP"
@@ -767,6 +798,47 @@ if [ "$IN_APP_UPDATE" = "1" ]; then
     || warn "${APP_NAME} has not relaunched yet; the exit failsafe will retry"
 fi
 
+# ── Pocket release model ───────────────────────────────
+# The model lives in an immutable, dedicated GitHub Release rather than inside
+# Cortex.app or Git history. The helper accepts only the pinned archive shape
+# and checksums, then runs offline after this point.
+pocket_file_matches() {
+  [ -f "$1" ] && [ "$(shasum -a 256 "$1" | awk '{print $1}')" = "$2" ]
+}
+
+pocket_release_model_ready() {
+  pocket_file_matches "$POCKET_MODEL_ROOT/model.safetensors" "$POCKET_MODEL_SHA256" \
+    && pocket_file_matches "$POCKET_MODEL_ROOT/tokenizer.model" "$POCKET_TOKENIZER_SHA256"
+}
+
+step "Pocket voice model"
+if pocket_release_model_ready; then
+  ok "verified Pocket model already installed"
+else
+  [ ! -L "$POCKET_MODEL_ROOT" ] || die "Pocket model directory must not be a symlink: $POCKET_MODEL_ROOT"
+  mkdir -p "$POCKET_MODEL_ROOT" || die "could not create Pocket model directory"
+  chmod 700 "$POCKET_MODEL_ROOT" 2>/dev/null || true
+  [ ! -L "$POCKET_MODEL_ROOT/model.safetensors" ] || die "Pocket model file must not be a symlink"
+  [ ! -L "$POCKET_MODEL_ROOT/tokenizer.model" ] || die "Pocket tokenizer file must not be a symlink"
+  dl_pocket_model "$WORK/$POCKET_MODEL_ASSET"
+  MODEL_STAGE="$(mktemp -d "$POCKET_MODEL_ROOT/.release.XXXXXX")"
+  MODEL_CONTENTS="$(tar -tzf "$WORK/$POCKET_MODEL_ASSET")" \
+    || die "could not inspect $POCKET_MODEL_ASSET"
+  [ "$MODEL_CONTENTS" = $'model.safetensors\ntokenizer.model' ] \
+    || die "$POCKET_MODEL_ASSET has unexpected contents"
+  tar -xzf "$WORK/$POCKET_MODEL_ASSET" -C "$MODEL_STAGE" \
+    || die "could not extract $POCKET_MODEL_ASSET"
+  pocket_file_matches "$MODEL_STAGE/model.safetensors" "$POCKET_MODEL_SHA256" \
+    && pocket_file_matches "$MODEL_STAGE/tokenizer.model" "$POCKET_TOKENIZER_SHA256" \
+    || die "$POCKET_MODEL_ASSET failed checksum verification"
+  mv "$MODEL_STAGE/model.safetensors" "$POCKET_MODEL_ROOT/model.safetensors" \
+    && mv "$MODEL_STAGE/tokenizer.model" "$POCKET_MODEL_ROOT/tokenizer.model" \
+    && rmdir "$MODEL_STAGE" \
+    || die "could not install the verified Pocket model"
+  chmod 600 "$POCKET_MODEL_ROOT/model.safetensors" "$POCKET_MODEL_ROOT/tokenizer.model" 2>/dev/null || true
+  ok "downloaded and verified Pocket model"
+fi
+
 # ── Bun (required for Node deps + the bot) ──────────────
 step "Bun"
 if command -v bun >/dev/null 2>&1; then
@@ -794,8 +866,10 @@ step "Dependencies (delegating to setup.command)"
 PRESERVED_CONFIG_BACKUP="$(capture_preserved_config_lines)"
 load_cli_overrides_from_config
 refresh_grok_cli_home
-( cd "$DATA_DIR" && CORTEX_RELEASE_INSTALL=1 bash setup.command ) || warn "setup.command reported problems (see above)"
-restore_cli_override_lines "$CLI_OVERRIDE_BACKUP"
+( cd "$DATA_DIR" && \
+  CORTEX_RELEASE_INSTALL=1 \
+  CORTEX_VOICE_TTS_BUNDLED_ASSET_DIR="$APP_PATH/Contents/Resources/standalone/scripts/voice-assets" \
+  bash setup.command ) || warn "setup.command reported problems (see above)"
 restore_preserved_config_lines "$PRESERVED_CONFIG_BACKUP"
 load_cli_overrides_from_config
 refresh_grok_cli_home
@@ -809,7 +883,7 @@ step "Realtime speech model"
 STT_RUNTIME_DIR="$HOME/Library/Application Support/Cortex/voice-stt"
 STT_PROVISIONER="$APP_PATH/Contents/Resources/standalone/scripts/provision-realtime-stt.sh"
 STT_DAEMON="$APP_PATH/Contents/Resources/standalone/scripts/stt_daemon.py"
-STT_QWEN_PYTHON="$HOME/.cortex-ai-sessions/voice-tts/.venv/bin/python3"
+STT_VOICE_TTS_PYTHON="$HOME/.cortex-ai-sessions/voice-tts/.venv/bin/python3"
 STT_CONFIG_TTS_PYTHON=""
 STT_CONFIG_PYTHON=""
 
@@ -842,7 +916,7 @@ stt_uv_is_compatible() {
   fi
 }
 
-# setup.command normally leaves a native Python 3.10–3.12 Qwen venv behind.
+# setup.command normally leaves a native Python 3.10–3.12 Pocket TTS venv behind.
 # Read its persisted path and PYTHON_BIN as inert values in case either points
 # somewhere else; never source the credential-bearing config file.
 if [ -f "$CONFIG" ]; then
@@ -870,7 +944,7 @@ for candidate in \
   "${CORTEX_VOICE_PYTHON:-}" \
   "${CORTEX_VOICE_TTS_PYTHON:-}" \
   "$STT_CONFIG_TTS_PYTHON" \
-  "$STT_QWEN_PYTHON" \
+  "$STT_VOICE_TTS_PYTHON" \
   "${PYTHON_BIN:-}" \
   "$STT_CONFIG_PYTHON" \
   "$(command -v python3.12 || true)" \
