@@ -36,8 +36,26 @@ REPO="${CORTEX_SOURCE_REPO:-appfactory123/claude-sessions}"
 PUBLIC_REPO="${CORTEX_PUBLIC_REPO:-appfactory123/cortex-ai-sessions-dist}"
 APP_NAME="Cortex Development"
 APP_PATH="/Applications/${APP_NAME}.app"
-DATA_DIR="$HOME/.cortex-ai-sessions"
-CONFIG="$HOME/.cortex-ai-sessions.env"
+# Cortex Builder publishes a renamed build (customizeCortexDevelopAppIdentity in
+# the Cortex repository) so a development Cortex can sit beside the released one.
+# Those are two apps, so they get two data dirs: sharing one would mean sharing
+# settings.json, sessions.json and the bot's state. Re-derived from the bundle
+# that was actually downloaded, once its name is known; CORTEX_DATA_DIR pins it
+# for an in-app update, which already knows which app it is updating.
+app_data_dir() {
+  local suffix
+  suffix="$(printf '%s' "${1:-}" \
+    | sed 's/^Cortex//' \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$//')"
+  if [ -n "$suffix" ]; then
+    printf '%s' "$HOME/.cortex-ai-sessions-$suffix"
+  else
+    printf '%s' "$HOME/.cortex-ai-sessions"
+  fi
+}
+DATA_DIR="${CORTEX_DATA_DIR:-$(app_data_dir "$APP_NAME")}"
+CONFIG="$DATA_DIR.env"
 TOKEN="${CORTEX_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
 IN_APP_UPDATE="${CORTEX_IN_APP_UPDATE:-}"
 
@@ -726,6 +744,18 @@ ok "downloaded $APP_ZIP"
 ditto -x -k "$WORK/$APP_ZIP" "$WORK/app" || die "could not unzip $APP_ZIP"
 SRC_APP="$(find "$WORK/app" -maxdepth 2 -name '*.app' -type d | head -n1)"
 [ -n "$SRC_APP" ] || die "no .app found inside $APP_ZIP"
+# A Develop build renames its bundle (customizeCortexDevelopAppIdentity in the
+# Cortex repository) so it can live beside the released Cortex. Install under the
+# name that was actually built: with the default name, that build replaces
+# /Applications/Cortex.app and the user loses the app they were already running.
+APP_NAME="$(basename "$SRC_APP" .app)"
+APP_PATH="/Applications/${APP_NAME}.app"
+if [ -z "${CORTEX_DATA_DIR:-}" ]; then
+  # The log stays where this run opened it; everything else follows the app.
+  DATA_DIR="$(app_data_dir "$APP_NAME")"
+  CONFIG="$DATA_DIR.env"
+  mkdir -p "$DATA_DIR"
+fi
 dl "$SUPPORT_TAR" "$WORK/$SUPPORT_TAR"
 mkdir -p "$WORK/support"
 tar -xzf "$WORK/$SUPPORT_TAR" -C "$WORK/support" || die "could not extract $SUPPORT_TAR"
@@ -868,6 +898,7 @@ load_cli_overrides_from_config
 refresh_grok_cli_home
 ( cd "$DATA_DIR" && \
   CORTEX_RELEASE_INSTALL=1 \
+  CORTEX_DATA_DIR="$DATA_DIR" \
   CORTEX_VOICE_TTS_BUNDLED_ASSET_DIR="$APP_PATH/Contents/Resources/standalone/scripts/voice-assets" \
   bash setup.command ) || warn "setup.command reported problems (see above)"
 restore_preserved_config_lines "$PRESERVED_CONFIG_BACKUP"
