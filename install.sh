@@ -34,7 +34,7 @@ set -euo pipefail
 
 REPO="${CORTEX_SOURCE_REPO:-appfactory123/claude-sessions}"
 PUBLIC_REPO="${CORTEX_PUBLIC_REPO:-appfactory123/cortex-ai-sessions-dist}"
-APP_NAME="Cortex Development"
+APP_NAME="Cortex"
 APP_PATH="/Applications/${APP_NAME}.app"
 # Cortex Builder publishes a renamed build (customizeCortexDevelopAppIdentity in
 # the Cortex repository) so a development Cortex can sit beside the released one.
