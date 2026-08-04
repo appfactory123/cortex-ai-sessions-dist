@@ -34,7 +34,7 @@ set -euo pipefail
 
 REPO="${CORTEX_SOURCE_REPO:-appfactory123/claude-sessions}"
 PUBLIC_REPO="${CORTEX_PUBLIC_REPO:-appfactory123/cortex-ai-sessions-dist}"
-APP_NAME="Cortex"
+APP_NAME="Cortex Development"
 APP_PATH="/Applications/${APP_NAME}.app"
 DATA_DIR="$HOME/.cortex-ai-sessions"
 CONFIG="$HOME/.cortex-ai-sessions.env"
