@@ -335,8 +335,8 @@ function Show-CliVersion {
   try {
     $version = ((& $Path --version 2>&1 | Select-Object -First 1 | Out-String).Trim())
   } catch {}
-  if ($version) { Ok "$Name: $Path ($version)" }
-  else { Ok "$Name: $Path" }
+  if ($version) { Ok "${Name}: $Path ($version)" }
+  else { Ok "${Name}: $Path" }
 }
 
 function Get-NpmGlobalPrefix {
