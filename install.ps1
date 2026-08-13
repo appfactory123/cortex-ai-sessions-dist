@@ -42,7 +42,7 @@ $PUBLIC_REPO = if ($env:CORTEX_PUBLIC_REPO) { $env:CORTEX_PUBLIC_REPO } else { '
 $APP_NAME    = 'Cortex'
 $INSTALL_DIR = Join-Path $env:LOCALAPPDATA 'Programs\Cortex'
 $APP_EXE     = Join-Path $INSTALL_DIR "$APP_NAME.exe"
-$DATA_DIR    = Join-Path $env:USERPROFILE '.cortex-ai-sessions'
+$DATA_DIR    = if ($env:CORTEX_DATA_DIR) { [System.IO.Path]::GetFullPath($env:CORTEX_DATA_DIR) } else { Join-Path $env:USERPROFILE '.cortex-ai-sessions' }
 $CONFIG      = Join-Path $env:USERPROFILE '.cortex-ai-sessions.env'
 $TOKEN       = if ($env:CORTEX_TOKEN) { $env:CORTEX_TOKEN } elseif ($env:GH_TOKEN) { $env:GH_TOKEN } else { $env:GITHUB_TOKEN }
 
